@@ -1,2 +1,3 @@
 # msgpunsafe
-Unsafe routines for msgpack decoding.
+Mostly unsafe routines for msgpack decoding.
+
