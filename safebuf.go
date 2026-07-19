@@ -9,7 +9,7 @@ import (
 // SafeBuffer buffer for safe storage of strings and bytes for msgpack data from
 // temporary buffer.
 type SafeBuffer struct {
-	buf []byte
+	buf  []byte
 }
 
 // NewSafeBuffer creates safe buffer with preallocated bytes. Beware, you better
@@ -32,10 +32,11 @@ func (b *SafeBuffer) AllocString(data unsafe.Pointer, size int) string {
 			return strings.Clone(unsafe.String((*byte)(data), size))
 		}
 
-		// Existing strings and slices passed through Alloc*  will still handle previous buffer.
 		b.buf = make([]byte, 0, cap(b.buf))
+		off = 0
 	}
 
+	// Existing strings and slices passed through Alloc*  will still handle previous buffer.
 	b.buf = append(b.buf, unsafe.Slice((*byte)(data), size)...)
 	return unsafe.String(
 		(*byte)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(b.buf)), off)),
@@ -55,6 +56,7 @@ func (b *SafeBuffer) AllocBytes(data unsafe.Pointer, size int) []byte {
 
 		// Existing strings and slices passed through Alloc*  will still handle previous buffer.
 		b.buf = make([]byte, 0, cap(b.buf))
+		off = 0
 	}
 
 	b.buf = append(b.buf, unsafe.Slice((*byte)(data), size)...)
