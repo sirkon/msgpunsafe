@@ -4,6 +4,16 @@ import (
 	"strconv"
 )
 
+func HandleError(r any, err *error) error {
+	if e, ok := r.(ErrorCode); ok {
+		if e.IsValid() {
+			*err = e
+		}
+	}
+
+	panic(r)
+}
+
 type ErrorCode int
 
 const (
