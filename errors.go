@@ -103,3 +103,7 @@ func (e ErrorCode) Error() string {
 func (e ErrorCode) IsValid() bool {
 	return int(e) >= 0 && int(e) < len(errorMessages)
 }
+
+func panicWithError(code ErrorCode) {
+	panic(code)
+}

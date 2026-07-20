@@ -6,9 +6,9 @@ import (
 
 // TakeBool reads a boolean value from Msgpack.
 // Returns the boolean value and an updated pointer.
-func TakeBool(src unsafe.Pointer, lim int) (bool, unsafe.Pointer) {
-	if lim == 0 {
-		panic(ErrorBoolExhausted)
+func TakeBool(src unsafe.Pointer, lim unsafe.Pointer) (bool, unsafe.Pointer) {
+	if uintptr(src) >= uintptr(lim) {
+		panicWithError(ErrorBoolExhausted)
 	}
 
 	lead := *(*byte)(src)
@@ -19,6 +19,8 @@ func TakeBool(src unsafe.Pointer, lim int) (bool, unsafe.Pointer) {
 	case 0xc3: // true
 		return true, unsafe.Add(src, 1)
 	default:
-		panic(ErrorBoolCorrupted)
+		panicWithError(ErrorBoolCorrupted)
 	}
+
+	return false, nil
 }

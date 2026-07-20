@@ -6,12 +6,11 @@ import (
 
 // TakeString reads a string from Msgpack, copies its content into the SafeBuffer,
 // and returns a long-lived string that safely survives the temporary Tarantool buffer.
-func TakeString(src unsafe.Pointer, lim int, sBuf *SafeBuffer) (string, unsafe.Pointer) {
+func TakeString(src unsafe.Pointer, lim unsafe.Pointer, sBuf *SafeBuffer) (string, unsafe.Pointer) {
 	strLen, dataPtr := TakeStrHeader(src, lim)
 
-	headerLen := int(uintptr(dataPtr) - uintptr(src))
-	if lim < headerLen+strLen {
-		panic(ErrorStrLenConflict)
+	if uintptr(dataPtr)+uintptr(strLen) > uintptr(lim) {
+		panicWithError(ErrorStrLenConflict)
 	}
 
 	safeStr := sBuf.AllocString(dataPtr, strLen)
@@ -22,16 +21,13 @@ func TakeString(src unsafe.Pointer, lim int, sBuf *SafeBuffer) (string, unsafe.P
 // TakeStringZC reads a string from Msgpack using Zero-Copy.
 // The returned string points directly into the incoming 'src' memory buffer.
 // WARNING: The string is only valid as long as the underlying source buffer is not cleared or reused.
-func TakeStringZC(src unsafe.Pointer, lim int) (string, unsafe.Pointer) {
+func TakeStringZC(src unsafe.Pointer, lim unsafe.Pointer) (string, unsafe.Pointer) {
 	// 1. Parse the string header to get the length and data pointer
 	strLen, dataPtr := TakeStrHeader(src, lim)
 
-	// Calculate how many bytes the header consumed
-	headerLen := int(uintptr(dataPtr) - uintptr(src))
-
 	// Ensure the actual string data fits within the remaining buffer
-	if lim < headerLen+strLen {
-		panic(ErrorStrLenConflict)
+	if uintptr(dataPtr)+uintptr(strLen) > uintptr(lim) {
+		panicWithError(ErrorStrLenConflict)
 	}
 
 	// 2. Create an immutable string looking directly into the incoming data buffer
@@ -43,12 +39,11 @@ func TakeStringZC(src unsafe.Pointer, lim int) (string, unsafe.Pointer) {
 
 // TakeBytes reads a byte slice from Msgpack, copies its content into the SafeBuffer,
 // and returns a long-lived []byte that safely survives the temporary Tarantool buffer.
-func TakeBytes(src unsafe.Pointer, lim int, sBuf *SafeBuffer) ([]byte, unsafe.Pointer) {
+func TakeBytes(src unsafe.Pointer, lim unsafe.Pointer, sBuf *SafeBuffer) ([]byte, unsafe.Pointer) {
 	binLen, dataPtr := TakeBinHeader(src, lim)
 
-	headerLen := int(uintptr(dataPtr) - uintptr(src))
-	if lim < headerLen+binLen {
-		panic(ErrorBinLenConflict)
+	if uintptr(dataPtr)+uintptr(binLen) > uintptr(lim) {
+		panicWithError(ErrorBinLenConflict)
 	}
 
 	safeBytes := sBuf.AllocBytes(dataPtr, binLen)
