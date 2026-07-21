@@ -4,11 +4,13 @@ import (
 	"strconv"
 )
 
-func HandleError(r any, err *error) error {
+func HandleError(r any, err *error) {
 	if e, ok := r.(ErrorCode); ok {
 		if e.IsValid() {
 			*err = e
 		}
+
+		return
 	}
 
 	panic(r)
