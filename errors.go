@@ -8,9 +8,8 @@ func HandleError(r any, err *error) {
 	if e, ok := r.(ErrorCode); ok {
 		if e.IsValid() {
 			*err = e
+			return
 		}
-
-		return
 	}
 
 	panic(r)

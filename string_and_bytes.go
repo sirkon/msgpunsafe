@@ -48,6 +48,6 @@ func TakeBytes(src unsafe.Pointer, lim unsafe.Pointer, sBuf *SafeBuffer) ([]byte
 
 	safeBytes := sBuf.AllocBytes(dataPtr, binLen)
 
-	// 3. Возвращаем слайс и сдвинутый указатель
+	// 3. Return the slice and the advanced pointer
 	return safeBytes, unsafe.Add(dataPtr, binLen)
 }

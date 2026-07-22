@@ -1,10 +1,10 @@
-//go:build !aware_of_alignment
+//go:build aware_of_alignment
 
 package msgpunsafe
 
 import (
+	"encoding/binary"
 	"math"
-	"math/bits"
 	"unsafe"
 )
 
@@ -40,22 +40,22 @@ func takeUint64(src unsafe.Pointer, lim unsafe.Pointer) (uint64, unsafe.Pointer)
 		if uintptr(lim)-uintptr(src) < 3 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint16)(unsafe.Add(src, 1))
-		return uint64(bits.ReverseBytes16(raw)), unsafe.Add(src, 3)
+		val := binary.BigEndian.Uint16(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 2))
+		return uint64(val), unsafe.Add(src, 3)
 
 	case 0xce: // uint 32
 		if uintptr(lim)-uintptr(src) < 5 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint32)(unsafe.Add(src, 1))
-		return uint64(bits.ReverseBytes32(raw)), unsafe.Add(src, 5)
+		val := binary.BigEndian.Uint32(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 4))
+		return uint64(val), unsafe.Add(src, 5)
 
 	case 0xcf: // uint 64
 		if uintptr(lim)-uintptr(src) < 9 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint64)(unsafe.Add(src, 1))
-		return bits.ReverseBytes64(raw), unsafe.Add(src, 9)
+		val := binary.BigEndian.Uint64(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 8))
+		return val, unsafe.Add(src, 9)
 
 	// --- Compatibility: parse signed ints that are actually positive ---
 	case 0xd0: // int 8
@@ -72,8 +72,7 @@ func takeUint64(src unsafe.Pointer, lim unsafe.Pointer) (uint64, unsafe.Pointer)
 		if uintptr(lim)-uintptr(src) < 3 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint16)(unsafe.Add(src, 1))
-		val := int16(bits.ReverseBytes16(raw))
+		val := int16(binary.BigEndian.Uint16(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 2)))
 		if val < 0 {
 			panicWithError(ErrorUintOverflow)
 		}
@@ -83,8 +82,7 @@ func takeUint64(src unsafe.Pointer, lim unsafe.Pointer) (uint64, unsafe.Pointer)
 		if uintptr(lim)-uintptr(src) < 5 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint32)(unsafe.Add(src, 1))
-		val := int32(bits.ReverseBytes32(raw))
+		val := int32(binary.BigEndian.Uint32(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 4)))
 		if val < 0 {
 			panicWithError(ErrorUintOverflow)
 		}
@@ -94,8 +92,7 @@ func takeUint64(src unsafe.Pointer, lim unsafe.Pointer) (uint64, unsafe.Pointer)
 		if uintptr(lim)-uintptr(src) < 9 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint64)(unsafe.Add(src, 1))
-		val := int64(bits.ReverseBytes64(raw))
+		val := int64(binary.BigEndian.Uint64(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 8)))
 		if val < 0 {
 			panicWithError(ErrorUintOverflow)
 		}
@@ -139,22 +136,22 @@ func takeInt64(src unsafe.Pointer, lim unsafe.Pointer) (int64, unsafe.Pointer) {
 		if uintptr(lim)-uintptr(src) < 3 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint16)(unsafe.Add(src, 1))
-		return int64(int16(bits.ReverseBytes16(raw))), unsafe.Add(src, 3)
+		val := binary.BigEndian.Uint16(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 2))
+		return int64(int16(val)), unsafe.Add(src, 3)
 
 	case 0xd2: // int 32
 		if uintptr(lim)-uintptr(src) < 5 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint32)(unsafe.Add(src, 1))
-		return int64(int32(bits.ReverseBytes32(raw))), unsafe.Add(src, 5)
+		val := binary.BigEndian.Uint32(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 4))
+		return int64(int32(val)), unsafe.Add(src, 5)
 
 	case 0xd3: // int 64
 		if uintptr(lim)-uintptr(src) < 9 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint64)(unsafe.Add(src, 1))
-		return int64(bits.ReverseBytes64(raw)), unsafe.Add(src, 9)
+		val := binary.BigEndian.Uint64(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 8))
+		return int64(val), unsafe.Add(src, 9)
 
 	// --- Compatibility: parse uints that arrive in place of ints ---
 	case 0xcc: // uint 8
@@ -167,22 +164,21 @@ func takeInt64(src unsafe.Pointer, lim unsafe.Pointer) (int64, unsafe.Pointer) {
 		if uintptr(lim)-uintptr(src) < 3 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint16)(unsafe.Add(src, 1))
-		return int64(bits.ReverseBytes16(raw)), unsafe.Add(src, 3)
+		val := binary.BigEndian.Uint16(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 2))
+		return int64(val), unsafe.Add(src, 3)
 
 	case 0xce: // uint 32
 		if uintptr(lim)-uintptr(src) < 5 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint32)(unsafe.Add(src, 1))
-		return int64(bits.ReverseBytes32(raw)), unsafe.Add(src, 5)
+		val := binary.BigEndian.Uint32(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 4))
+		return int64(val), unsafe.Add(src, 5)
 
 	case 0xcf: // uint 64
 		if uintptr(lim)-uintptr(src) < 9 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint64)(unsafe.Add(src, 1))
-		val := bits.ReverseBytes64(raw)
+		val := binary.BigEndian.Uint64(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 8))
 
 		if val > math.MaxInt64 {
 			panicWithError(ErrorIntOverflow)
@@ -207,16 +203,14 @@ func takeFloat32(src unsafe.Pointer, lim unsafe.Pointer) (float32, unsafe.Pointe
 		if uintptr(lim)-uintptr(src) < 5 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint32)(unsafe.Add(src, 1))
-		bits32 := bits.ReverseBytes32(raw)
+		bits32 := binary.BigEndian.Uint32(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 4))
 		return math.Float32frombits(bits32), unsafe.Add(src, 5)
 
 	case 0xcb: // float 64
 		if uintptr(lim)-uintptr(src) < 9 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint64)(unsafe.Add(src, 1))
-		bits64 := bits.ReverseBytes64(raw)
+		bits64 := binary.BigEndian.Uint64(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 8))
 		return float32(math.Float64frombits(bits64)), unsafe.Add(src, 9)
 
 	default:
@@ -238,16 +232,14 @@ func takeFloat64(src unsafe.Pointer, lim unsafe.Pointer) (float64, unsafe.Pointe
 		if uintptr(lim)-uintptr(src) < 5 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint32)(unsafe.Add(src, 1))
-		bits32 := bits.ReverseBytes32(raw)
+		bits32 := binary.BigEndian.Uint32(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 4))
 		return float64(math.Float32frombits(bits32)), unsafe.Add(src, 5)
 
 	case 0xcb: // float 64
 		if uintptr(lim)-uintptr(src) < 9 {
 			panicWithError(ErrorNumberTruncated)
 		}
-		raw := *(*uint64)(unsafe.Add(src, 1))
-		bits64 := bits.ReverseBytes64(raw)
+		bits64 := binary.BigEndian.Uint64(unsafe.Slice((*byte)(unsafe.Add(src, 1)), 8))
 		return math.Float64frombits(bits64), unsafe.Add(src, 9)
 
 	default:
