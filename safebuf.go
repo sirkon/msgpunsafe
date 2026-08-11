@@ -9,8 +9,11 @@ import (
 // SafeBuffer buffer for safe storage of strings and bytes for msgpack data from
 // temporary buffer.
 type SafeBuffer struct {
-	buf  []byte
+	buf []byte
 }
+
+// ptrAlignment is the alignment guarantees for AllocAligned.
+const ptrAlignment = 8
 
 // NewSafeBuffer creates safe buffer with preallocated bytes. Beware, you better
 // not to use anything larger than 512 unless you are going to reuse it.
@@ -64,4 +67,43 @@ func (b *SafeBuffer) AllocBytes(data unsafe.Pointer, size int) []byte {
 		(*byte)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(b.buf)), off)),
 		size,
 	)
+}
+
+// AllocAligned reserves size bytes in the buffer and returns a pointer to the
+// reserved slot aligned to ptrAlignment bytes. The caller must write the full
+// value immediately after allocation; the padding bytes before the slot are
+// never read.
+//
+// When the buffer cannot hold the slot, a dedicated allocation is made instead
+// and b.buf is left untouched; previously returned pointers keep pointing into
+// their own backing arrays and remain valid.
+func (b *SafeBuffer) AllocAligned(size int) unsafe.Pointer {
+	if size+ptrAlignment-1 > cap(b.buf) {
+		// No room in the buffer at all, not even after a reset. Do it straight.
+		raw := make([]byte, size+ptrAlignment)
+		base := unsafe.Pointer(unsafe.SliceData(raw))
+		pad := (ptrAlignment - uintptr(base)%ptrAlignment) % ptrAlignment
+		return unsafe.Add(base, int(pad))
+	}
+
+	var zeros [ptrAlignment]byte
+
+	for {
+		off := len(b.buf)
+		base := unsafe.Pointer(unsafe.SliceData(b.buf))
+		addr := uintptr(base) + uintptr(off)
+		pad := (ptrAlignment - addr%ptrAlignment) % ptrAlignment
+
+		if uintptr(off)+pad+uintptr(size) <= uintptr(cap(b.buf)) {
+			b.buf = append(b.buf, zeros[:pad]...)
+			start := len(b.buf)
+			b.buf = b.buf[:start+size]
+			return unsafe.Add(base, int(uintptr(off)+pad))
+		}
+
+		// Buffer exhausted: reset and retry. A fresh buffer has cap(b.buf) >=
+		// size+ptrAlignment-1, so the aligned slot is guaranteed to fit and the
+		// loop terminates after at most one reset.
+		b.buf = make([]byte, 0, cap(b.buf))
+	}
 }

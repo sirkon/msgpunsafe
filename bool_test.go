@@ -38,3 +38,40 @@ func TestTakeBool(t *testing.T) {
 		})
 	}
 }
+
+func TestTakeBoolPtr(t *testing.T) {
+	src, lim := ptrs(b(0xc3))
+	sBuf := NewSafeBuffer(512)
+	var got *bool
+	runTake(t, "boolptr", 0, b(0xc3), src,
+		func() (bool, unsafe.Pointer) {
+			var next unsafe.Pointer
+			got, next = TakeBoolPtr(src, lim, sBuf)
+			return false, next
+		})
+	if got == nil || !*got {
+		t.Fatalf("got %v, want true", got)
+	}
+	if uintptr(unsafe.Pointer(got))%8 != 0 {
+		t.Fatalf("pointer %x is not 8-byte aligned", uintptr(unsafe.Pointer(got)))
+	}
+	if !ptrInBuf(sBuf, unsafe.Pointer(got)) {
+		t.Fatalf("pointer must point into the safe buffer")
+	}
+}
+
+func TestTakeBoolPtr_ErrorNoAlloc(t *testing.T) {
+	src, lim := ptrs(b(0x05)) // corrupted marker
+	sBuf := NewSafeBuffer(512)
+	var got *bool
+	runTake(t, "boolptr corrupted", ErrorBoolCorrupted, b(0x05), src,
+		func() (bool, unsafe.Pointer) {
+			var next unsafe.Pointer
+			got, next = TakeBoolPtr(src, lim, sBuf)
+			return false, next
+		})
+	_ = got
+	if len(sBuf.buf) != 0 {
+		t.Fatalf("buffer must stay untouched on error, len = %d", len(sBuf.buf))
+	}
+}

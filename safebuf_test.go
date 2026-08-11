@@ -250,3 +250,127 @@ func TestSafeBuffer_GCRetention_MixedPaths(t *testing.T) {
 		t.Fatalf("cloned value corrupted after GC: got %v, want %v", sClone, wantClone)
 	}
 }
+
+// AllocAligned must return 8-byte-aligned pointers for every slot size,
+// including after an odd-sized previous allocation.
+func TestSafeBuffer_AllocAligned_Alignment(t *testing.T) {
+	sBuf := NewSafeBuffer(128)
+
+	// Alignment of the base backing array is not guaranteed by Go; first make
+	// an odd-sized allocation to guarantee misalignment in the sequence.
+	odd := []byte("abc")
+	first := sBuf.AllocAligned(3)
+	copy(unsafe.Slice((*byte)(first), 3), odd)
+
+	for _, size := range []int{1, 2, 4, 8} {
+		p := sBuf.AllocAligned(size)
+		if uintptr(p)%8 != 0 {
+			t.Fatalf("size %d: address %x is not 8-byte aligned", size, uintptr(p))
+		}
+		if !ptrInBuf(sBuf, p) {
+			t.Fatalf("size %d: pointer %x must be inside the buffer", size, uintptr(p))
+		}
+	}
+}
+
+// Sequential AllocAligned calls must pack slots back to back (with padding to
+// the alignment) without overlapping.
+func TestSafeBuffer_AllocAligned_Packing(t *testing.T) {
+	sBuf := NewSafeBuffer(128)
+
+	p1 := sBuf.AllocAligned(1)
+	p2 := sBuf.AllocAligned(1)
+	p3 := sBuf.AllocAligned(8)
+
+	a1 := uintptr(p1)
+	a2 := uintptr(p2)
+	a3 := uintptr(p3)
+
+	if a2-a1 != 8 {
+		t.Fatalf("gap between 1-byte slots = %d, want 8 (1 slot + 7 pad)", a2-a1)
+	}
+	if a3-a2 != 8 {
+		t.Fatalf("gap between 1-byte and 8-byte slots = %d, want 8", a3-a2)
+	}
+	if a3-a1 != 16 {
+		t.Fatalf("span between first and third slots = %d, want 16", a3-a1)
+	}
+	// buf len: 1 slot + 7 pad, then 1 slot + 7 pad, then 8-byte slot = 24
+	// (the last slot needs no padding).
+	if len(sBuf.buf) != 24 {
+		t.Fatalf("buf len = %d, want 24", len(sBuf.buf))
+	}
+}
+
+// When the current buffer cannot hold the aligned slot, a fresh backing array
+// is allocated and the cursor resets; earlier pointers remain valid and
+// aligned (they point into the previous array).
+func TestSafeBuffer_AllocAligned_Exhaustion(t *testing.T) {
+	sBuf := NewSafeBuffer(16)
+
+	p1 := sBuf.AllocAligned(8)
+	// 8 bytes used; a misaligned 8-byte slot may need up to 7 more padding
+	// bytes, so force exhaustion with several allocations.
+	p2 := sBuf.AllocAligned(8)
+	p3 := sBuf.AllocAligned(8)
+
+	if !ptrInBuf(sBuf, unsafe.Pointer(p3)) {
+		t.Fatalf("p3 must point into the current buffer")
+	}
+	for _, p := range []unsafe.Pointer{p1, p2} {
+		if uintptr(p)%8 != 0 {
+			t.Fatalf("old pointer %x is not 8-byte aligned", uintptr(p))
+		}
+		if ptrInBuf(sBuf, p) {
+			t.Fatalf("old pointer %x must point into a previous (detached) buffer", uintptr(p))
+		}
+	}
+	if len(sBuf.buf) != 8 {
+		t.Fatalf("buf len = %d, want 8 (single slot after reset)", len(sBuf.buf))
+	}
+}
+
+// When size+ptrAlignment-1 > cap, AllocAligned must use a dedicated
+// allocation, leave b.buf untouched, and still return an aligned pointer.
+func TestSafeBuffer_AllocAligned_Direct(t *testing.T) {
+	sBuf := NewSafeBuffer(8)
+
+	p := sBuf.AllocAligned(32)
+	if uintptr(p)%8 != 0 {
+		t.Fatalf("address %x is not 8-byte aligned", uintptr(p))
+	}
+	if ptrInBuf(sBuf, p) {
+		t.Fatalf("direct path must not use the buffer")
+	}
+	if len(sBuf.buf) != 0 {
+		t.Fatalf("buffer must stay untouched on the direct path, len = %d", len(sBuf.buf))
+	}
+}
+
+// Values stored through AllocAligned must survive GC: the returned pointers
+// keep their backing arrays alive.
+func TestSafeBuffer_AllocAligned_GCRetention(t *testing.T) {
+	sBuf := NewSafeBuffer(32)
+
+	p1 := (*int64)(sBuf.AllocAligned(8))
+	*p1 = 111
+	p2 := (*int64)(sBuf.AllocAligned(8))
+	*p2 = 222
+
+	// Exhaust the buffer so subsequent allocations go to a fresh array.
+	big := sBuf.AllocAligned(30)
+	*(*int64)(big) = 333
+	p3 := (*int64)(sBuf.AllocAligned(8))
+	*p3 = 444
+
+	// Hammer the GC with allocation pressure. If the backing arrays were not
+	// retained, the pointed-to values would be corrupted.
+	for range 10 {
+		runtime.GC()
+		_ = make([]byte, 1<<20)
+	}
+
+	if *p1 != 111 || *p2 != 222 || *p3 != 444 {
+		t.Fatalf("values corrupted after GC: %d %d %d", *p1, *p2, *p3)
+	}
+}

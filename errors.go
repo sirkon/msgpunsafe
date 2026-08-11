@@ -53,6 +53,12 @@ const (
 	ErrorStructCorrupted
 	ErrorUnknownField
 	ErrorRequiredFieldMissing
+
+	ErrorSkipExhausted
+	ErrorSkipHeaderTruncated
+	ErrorSkipCorrupted
+	ErrorSkipLenConflict
+	ErrorSkipRecursion
 )
 
 var _ error = ErrorCode(0)
@@ -91,6 +97,12 @@ var errorMessages = [...]string{
 	ErrorStructCorrupted:      "msgpack: struct data corrupted",
 	ErrorUnknownField:         "msgpack: unknown field encountered in structured data",
 	ErrorRequiredFieldMissing: "msgpack: required structural field is missing in msgpack map",
+
+	ErrorSkipExhausted:       "msgpack: skip data exhausted",
+	ErrorSkipHeaderTruncated: "msgpack: skip header is truncated",
+	ErrorSkipCorrupted:       "msgpack: skip encountered invalid msgpack marker",
+	ErrorSkipLenConflict:     "msgpack: skip length conflicts with remaining buffer size",
+	ErrorSkipRecursion:       "msgpack: skip recursion limit exceeded",
 }
 
 func (e ErrorCode) Error() string {

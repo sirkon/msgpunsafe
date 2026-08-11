@@ -24,3 +24,12 @@ func TakeBool(src unsafe.Pointer, lim unsafe.Pointer) (bool, unsafe.Pointer) {
 
 	return false, nil
 }
+
+// TakeBoolPtr reads a boolean value, stores it in the SafeBuffer and returns an
+// 8-byte-aligned pointer to it.
+func TakeBoolPtr(src unsafe.Pointer, lim unsafe.Pointer, sBuf *SafeBuffer) (*bool, unsafe.Pointer) {
+	v, next := TakeBool(src, lim)
+	p := (*bool)(sBuf.AllocAligned(int(unsafe.Sizeof(v))))
+	*p = v
+	return p, next
+}
