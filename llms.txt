@@ -1,0 +1,225 @@
+# msgpunsafe — Usage Context
+
+## What this is
+
+`msgpunsafe` (`github.com/sirkon/msgpunsafe`) is a zero-dependency Go library of
+**unsafe, panic-based deserialization primitives for msgpack (MessagePack)**.
+It is a library only: no executable, no CLI, no `main` package. It is designed
+to back generated msgpack decoders (the `ErrorStruct*` /
+`ErrorRequiredFieldMissing` codes exist for that purpose; the generated-code
+consumer lives in another repo).
+
+Every consumer-facing function is named `Take*` and reads exactly one value
+from a raw byte buffer using a `src`/`lim` pointer-pair cursor model. Failures
+are reported by **panicking with an `ErrorCode`** (never a returned error).
+
+## Cursor model (core concept)
+
+A decode position is a pair of `unsafe.Pointer`s:
+
+- `src` — current read position.
+- `lim` — one-past-the-end bound of the whole buffer.
+
+Every `Take*` returns `(value, nextPtr)` where `nextPtr` is the advanced cursor;
+the caller is responsible for threading `nextPtr` into the next call. Bounds
+checks compare `uintptr(src)` against `uintptr(lim)` *before* dereferencing;
+multi-byte reads additionally verify `uintptr(lim)-uintptr(src) >= size+1`.
+
+## Quick usage example
+
+```go
+package main
+
+import (
+    "fmt"
+    "unsafe"
+
+    "github.com/sirkon/msgpunsafe"
+)
+
+func decode(input []byte) (err error) {
+    defer msgpunsafe.HandleError(recover(), &err)
+
+    // Build the cursor pair.
+    src := unsafe.Pointer(&input[0])
+    lim := unsafe.Add(src, len(input))
+
+    // Reusable arena so returned strings/pointers outlive the temp buffer.
+    buf := msgpunsafe.NewSafeBuffer(512)
+
+    n, src := msgpunsafe.TakeInt64(src, lim)       // a number
+    s, src := msgpunsafe.TakeString(src, lim, buf) // a string (copied)
+    b, src := msgpunsafe.TakeBool(src, lim)        // a bool
+    _ = b
+
+    fmt.Println(n, s)
+    return nil
+}
+```
+
+Note: `HandleError` must be the first thing in a `defer` so it wraps the
+`recover()` call. It converts a valid `ErrorCode` panic into `*err` and
+re-panics anything else.
+
+## API reference
+
+### Headers (`headers.go`)
+
+| Function | Signature | Returns |
+|---|---|---|
+| `TakeSliceHeader` | `(src, lim)` | `(elementCount, next)` for array markers `0x90-0x9f`, `0xdc`, `0xdd` |
+| `TakeMapHeader` | `(src, lim)` | `(pairCount, next)` for map markers `0x80-0x8f`, `0xde`, `0xdf` |
+| `TakeStrHeader` | `(src, lim)` | `(byteSize, dataPtr)` for str markers `0xa0-0xbf`, `0xd9-0xdb` |
+| `TakeBinHeader` | `(src, lim)` | `(byteSize, dataPtr)` for bin markers `0xc4-0xc6` |
+
+### Scalars
+
+| Function | Returns | Notes |
+|---|---|---|
+| `TakeUint`, `TakeUint8/16/32/64` | `(uintN, next)` | overflow panics if value doesn't fit |
+| `TakeInt`, `TakeInt8/16/32/64` | `(intN, next)` | overflow panics if value doesn't fit |
+| `TakeFloat32`, `TakeFloat64` | `(floatN, next)` | |
+| `TakeBool` | `(bool, next)` | markers `0xc2`/`0xc3` |
+| `IsNil` | `(bool, ptr)` | `0xc0`; **pointer unchanged when non-nil** (exception to the next-pointer rule) |
+
+### Strings and bytes (`string_and_bytes.go`)
+
+| Function | Returns | Notes |
+|---|---|---|
+| `TakeString` | `(string, next)` | copies into `*SafeBuffer`; survives temp buffer reuse |
+| `TakeStringZC` | `(string, next)` | zero-copy; points **into** caller's buffer, caller must keep it alive |
+| `TakeBytes` | `([]byte, next)` | copies into `*SafeBuffer` |
+
+### Pointer-returning variants (`numbers_ptr.go`, `bool.go`)
+
+`TakeIntPtr`, `TakeInt8Ptr` … `TakeUintPtr` … `TakeFloat32Ptr`/`TakeFloat64Ptr`
+and `TakeBoolPtr` parse via the scalar `Take*`, store the value in an
+8-byte-aligned `SafeBuffer` slot (`AllocAligned`), and return `(*T, next)`.
+Used where the generated decoder needs a stable pointer to a field.
+
+### Skip (`skip.go`)
+
+`TakeSkip(src, lim) unsafe.Pointer` skips one complete msgpack object
+(containers recursively) using an explicit stack, with **zero allocation**.
+It returns the pointer just past the object. Own error family
+(`ErrorSkip*`), recursion limit `skipRecursionLimit = 100000`.
+
+### SafeBuffer (`safebuf.go`)
+
+`NewSafeBuffer(cap)` preallocates a reusable arena. Prefer `cap <= 512` and
+reuse the buffer across decodes.
+
+> **Default buffer size = fastest (benchmarked).** Sweeping `SafeBuffer`
+> capacity over a realistic string-decode workload (`BenchmarkTakeString_*` in
+> `bench_test.go`), the 512-byte default is the throughput sweet spot:
+>
+> | capacity | `NewSafeBuffer` cost | fresh-buffer decode | reused-buffer decode |
+> |---|---|---|---|
+> | 64 B | 14 ns / 64 B / 1 alloc | ~178 ns | ~178 ns |
+> | 128 B | 20 ns / 128 B / 1 alloc | ~131 ns | ~130 ns |
+> | 256 B | 32 ns / 256 B / 1 alloc | ~115 ns / 2 allocs | ~106 ns / 1 alloc |
+> | **512 B** | **60 ns** / 512 B / 1 alloc | **~115 ns / 1 alloc** | **~109 ns / 0 allocs** |
+> | 1024 B | 110 ns / 1024 B / 1 alloc | ~171 ns | ~96 ns / 0 allocs |
+> | 2048 B | 220 ns / 2048 B / 1 alloc | ~291 ns | ~93 ns / 0 allocs |
+> | 4096 B | 430 ns / 4096 B / 1 alloc | ~495 ns | ~96 ns / 0 allocs |
+>
+> 512 is the best *combined* choice: it is large enough that a message's
+> strings fit without a mid-decode reset (0 extra allocs when reused), yet small
+> enough that allocating/zeroing the arena stays cheap. Larger capacities only
+> shave ~10 ns off the reused-buffer steady state while costing up to 7× more
+> upfront allocation; smaller capacities pay more in extra clone/alloc calls.
+
+- `AllocString(data, size) string` / `AllocBytes(data, size) []byte` — copy into
+  the arena so the result outlives the temporary source (e.g. a Tarantool
+  response buffer). If `size > cap` they fall back to a direct
+  `strings.Clone`/`bytes.Clone`; otherwise they reset/append into the backing
+  array (previously returned headers keep prior backing arrays alive).
+- `AllocAligned(size) unsafe.Pointer` — reserves a slot aligned to
+  `ptrAlignment = 8`; the caller must write the full value immediately. Its
+  direct-fallback threshold is `size+7 > cap` (not `size > cap`), so a reset
+  buffer can never loop forever.
+
+### Error handling (`errors.go`)
+
+- `HandleError(r any, err *error)` — recover helper for `defer`: maps a valid
+  `ErrorCode` panic to `*err`, re-panics anything else.
+- `ErrorCode` is an `int` implementing `error`. `Error()` and `IsValid()` panic
+  on out-of-range codes (this is how `HandleError` distinguishes msgs errors
+  from unrelated panics).
+- Error categories per type: `*Exhausted`, `*HeaderTruncated`,
+  `*HeaderCorrupted`, `*LenConflict`, `*Overflow`, `*Corrupted`.
+
+## Commands
+
+```sh
+go test ./...                          # default build (non-aligned readout)
+go test -tags=aware_of_alignment ./... # alignment-safe readout
+go vet ./...
+go vet -tags=aware_of_alignment ./...
+```
+
+- Go 1.26 (see `go.mod`); relies on Go 1.22+ (`for range N`) and Go 1.25
+  (`sync.Go` in tests).
+- No CI, no Makefile, no linter config. `go test` is the only gate.
+- **Gotcha:** `go test -race ./...` crashes with
+  `fatal error: checkptr: pointer arithmetic result points to invalid allocation`
+  in `ptrs()` (`testhelp_test.go`), where `unsafe.Add(p, len(input))` computes
+  `lim` past the slice's real allocation. Test-helper limitation only; plain and
+  `-tags=aware_of_alignment` runs pass.
+
+## Architecture
+
+| File | Contents |
+|---|---|
+| `headers.go` | Container/str/bin header readers. |
+| `numbers.go` | Typed wrappers `TakeUint*`/`TakeInt*`/`TakeFloat*` that call internal `take*` and narrow with overflow `panic`. |
+| `numbers_base.go` | Numeric decoding, **`//go:build !aware_of_alignment` (default)** — native-endian cast + `bits.ReverseBytes*`. Fast, unsafe on unaligned buffers. |
+| `numbers_base_align.go` | Numeric decoding, **`//go:build aware_of_alignment`** — `encoding/binary.BigEndian` over `unsafe.Slice`. Alignment-safe, slower. Keep in lockstep with `numbers_base.go`. |
+| `bool.go` | `TakeBool`, `TakeBoolPtr`. |
+| `nil.go` | `IsNil`. |
+| `string_and_bytes.go` | `TakeString`, `TakeStringZC`, `TakeBytes`. |
+| `safebuf.go` | `SafeBuffer` arena. |
+| `numbers_ptr.go` | `Take*Ptr` variants for int/uint/float widths. |
+| `skip.go` | `TakeSkip` and its `ErrorSkip*` family. |
+| `errors.go` | `ErrorCode`, messages, `HandleError`, `panicWithError`. |
+
+## Non-obvious behavior
+
+- **Cross-signedness parsing:** `takeUint64` also parses `0xd0-0xd3` (int
+  markers) as unsigned, panicking `ErrorUintOverflow` on negatives; `takeInt64`
+  also parses `0xcc-0xcf` (uint markers), panicking `ErrorIntOverflow` above
+  `math.MaxInt64`. Deliberate, for compatibility.
+- **`IsNil` return convention:** unchanged `src` on non-nil (all other `Take*`
+  return the advanced pointer).
+- **Wrong-type header markers** are reported only as `*HeaderCorrupted` (open
+  TODO in `headers.go` about distinguishing e.g. map-vs-array).
+- **Two numeric backends:** when changing numeric decoding, edit BOTH
+  `numbers_base.go` and `numbers_base_align.go` and test with both build tags.
+
+## Conventions
+
+- Public API `Take*` with full godoc comments (godoc is the only documentation;
+  `README.md` is a stub). Internal helpers are lowercase (`take*`,
+  `panicWithError`).
+- Errors are panics with `ErrorCode`, recovered via `HandleError`.
+- Multi-byte reads bounds-check `uintptr(lim)-uintptr(src)` against total bytes
+  needed (lead byte + payload).
+- Adding an `ErrorCode`: append at the **end** of the const block and extend
+  `errorMessages` in matching index order. `ErrorSliceExhausted` is `iota == 0`;
+  tests use `wantErrCode == 0` as "no panic expected", so never introduce a new
+  zero code.
+
+## Testing
+
+- One `_test.go` per source file plus `testhelp_test.go` (shared helpers).
+- `testhelp_test.go`: `b(...byte)` builds payloads; `ptrs(input)` builds the
+  `(src, lim)` pair (empty input → two equal pointers = "exhausted");
+  `runTake[T](...)` runs any `Take*` under `recover` and asserts either the exact
+  `ErrorCode` or full-buffer consumption. Reuse these; don't duplicate.
+- Table-driven per typed wrapper, each covering happy path (all encodings),
+  truncation, corruption, exhaustion, and narrowing overflow. `numbers_test.go`
+  is the model to copy.
+- `safebuf_test.go` asserts returned pointers physically live inside/outside the
+  backing array (`ptrInBuf`) and hammers `runtime.GC()` for retention.
+- gopls warns that `numbers_base_align.go` is excluded by build tags (expected);
+  add `-tags=aware_of_alignment` to gopls build flags if you edit it often.

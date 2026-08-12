@@ -1,0 +1,421 @@
+# msgpunsafe — Full Conceptual Reference
+
+This is the deep, conceptual companion to `llms.txt` (the fast-reference /
+usage-context file). It explains *why* the library is shaped the way it is,
+the invariants each piece relies on, and the mental model required to modify it
+safely. Read `llms.txt` first for the concrete API surface and commands; come
+here to understand the design.
+
+---
+
+## 1. The problem this library solves
+
+`msgpunsafe` is not a general-purpose msgpack codec. It is the **leaf-layer
+decoder** for a msgpack *code generator*. The real consumer is generated code
+that, for every struct field, emits a sequence of `Take*` calls.
+
+That framing drives every design decision:
+
+- **Speed over safety.** Generated decoders sit on hot paths. The library
+  trades Go's memory-safety guarantees (via `unsafe`) for the ability to read a
+  byte, a `uint32`, or a string out of a raw buffer with a few pointer
+  comparisons and a couple of instructions.
+- **Panics, not errors.** Returning `(value, error)` forces a branch on every
+  single field decode and forces the generator to thread `err` through
+  hundreds of generated functions. Panicking lets the generator write a linear
+  `v, src = TakeInt64(src, lim); v2, src = TakeString(src, lim, buf); …`
+  and wrap the *whole* decode in a single `defer` + `recover`. The happy path
+  pays zero error-handling cost.
+- **Zero allocation on the happy path.** `TakeSkip`, header readers, and the
+  scalar readers allocate nothing. Strings/bytes are copied into a reusable
+  `SafeBuffer` arena rather than allocated per field.
+
+---
+
+## 2. The cursor model: `src` / `lim`
+
+Decoding state is two `unsafe.Pointer`s, nothing else:
+
+```
+        src ────────────────►
+  ┌───────────────────────────────────────────────┐
+  │  ... consumed ... │  value  │ ... unread ...  │
+  └───────────────────────────────────────────────┘
+                                                      lim (one past the end)
+```
+
+- `src` — where the next lead byte lives.
+- `lim` — one past the last byte of the buffer; `src == lim` means "exhausted".
+
+Every `Take*` is a pure function of `(src, lim)`: it reads starting at `src`
+and returns `(value, nextSrc)`. It never mutates the buffer and never stores
+global state. The caller (generated code) owns threading `nextSrc` forward.
+
+### Why pointers, not `[]byte` + index?
+
+A slice + index is the idiomatic choice, but it has two costs:
+
+1. Every element access re-checks the index against the slice length (bounds
+   check), and the compiler cannot always elide it across a function boundary.
+2. It requires passing the slice and the index around together.
+
+With `src`/`lim`, the bounds check is the explicit `uintptr` comparison the
+code already needs to write, and the compiler can keep both pointers in
+registers. The "advance" operation is a single `unsafe.Add`.
+
+### The bounds-check discipline
+
+The library follows one rule, strictly:
+
+> Compare `uintptr(src)` against `uintptr(lim)` **before** any dereference.
+
+- Single-byte reads: `if uintptr(src) >= uintptr(lim) { panic(...) }`.
+- Multi-byte reads: `if uintptr(lim)-uintptr(src) < total { panic(...) }`,
+  where `total` is `1` (lead byte) + payload width. This is checked *before*
+  the cast/dereference, so a truncated value panics with `*HeaderTruncated` /
+  `*NumberTruncated` instead of reading out of bounds.
+
+Because the comparisons use `uintptr`, the code is careful to only *read*
+through `unsafe.Pointer` after the check has passed. Pointer arithmetic itself
+(`unsafe.Add`) may temporarily produce a pointer past the allocation (as the
+`lim` construction does) — that is legal in Go as long as you do not
+*dereference* it.
+
+---
+
+## 3. The panic-based error model
+
+### The core idea
+
+All decoding failures raise a `panic` carrying an `ErrorCode` value. The
+`ErrorCode` type is just an `int` that also implements `error`:
+
+```go
+type ErrorCode int
+func (e ErrorCode) Error() string { ... }
+func (e ErrorCode) IsValid() bool { ... }
+```
+
+`panicWithError(code)` is literally `panic(code)` — the code *is* the panic
+value, nothing more.
+
+### Recovery: `HandleError`
+
+The consumer recovers exactly once, at the top of a decode, via a `defer`:
+
+```go
+func decode(data []byte) (err error) {
+    defer msgpunsafe.HandleError(recover(), &err)
+    // ... linear Take* calls ...
+}
+```
+
+`HandleError(r any, err *error)` does:
+
+1. If `r` is an `ErrorCode` **and** `IsValid()`, assign it to `*err` and stop.
+2. Otherwise, `panic(r)` — re-raise anything that is not a msgpunsafe error.
+
+`IsValid()` is what makes this safe: it distinguishes "a real msgs error code"
+from "a garbage `int` that happens to have the right dynamic type", and from
+any unrelated panic (nil-pointer, out-of-range slice, user code, …), which is
+always re-raised so it does not get silently swallowed.
+
+### The invariants
+
+- A new `ErrorCode` is appended at the **end** of the const block, and
+  `errorMessages` gets a matching entry at the **same index**. The two are
+  index-aligned; `Error()` and `IsValid()` both rely on `0 <= e < len(errorMessages)`.
+- `ErrorSliceExhausted` is `iota == 0`. Tests treat `wantErrCode == 0` as
+  "no panic expected", so a zero code must never be introduced — it would be
+  indistinguishable from "no error".
+- `Error()`/`IsValid()` panic on out-of-range codes deliberately: a code that
+  fails `IsValid()` is a programming bug, not data.
+
+### Error taxonomy
+
+Each typed reader owns a family of codes, but they all follow one shape:
+
+| Category | Meaning | Example codes |
+|---|---|---|
+| `*Exhausted` | `src >= lim` — nothing to read at all | `ErrorSliceExhausted`, `ErrorNumberExhausted` |
+| `*HeaderTruncated` | marker present, its size/header bytes missing | `ErrorMapHeaderTruncated` |
+| `*HeaderCorrupted` / `*Corrupted` | wrong/unassigned marker byte | `ErrorBoolCorrupted`, `ErrorSkipCorrupted` |
+| `*LenConflict` | declared length exceeds remaining buffer | `ErrorStrLenConflict`, `ErrorBinLenConflict` |
+| `*Overflow` | value does not fit the target type | `ErrorIntOverflow`, `ErrorUintOverflow` |
+
+`ErrorStruct*`, `ErrorUnknownField`, `ErrorRequiredFieldMissing` are reserved
+for the (external) generated-code layer and are not raised in this repo.
+
+---
+
+## 4. `unsafe` reads and the alignment question
+
+### Reading multi-byte values
+
+The naive fast path for a big-endian `uint32` is:
+
+```go
+raw := *(*uint32)(unsafe.Add(src, 1))   // native endianness
+val := bits.ReverseBytes32(raw)         // to big-endian
+```
+
+This is exactly what `numbers_base.go` (the default build) does. It is the
+fastest possible form: one load, one byte-swap.
+
+**The catch:** a `*(*uint32)(p)` load assumes `p` is 4-byte-aligned. On
+architectures that fault on unaligned access (and under Go's `checkptr`), a
+pointer into the middle of a byte slice is *not* guaranteed aligned — the msgpack
+value can begin at any offset.
+
+### The two build tags
+
+The library ships two identical-function twin backends, selected at build time:
+
+| Build | File | Reads via | Properties |
+|---|---|---|---|
+| default (`!aware_of_alignment`) | `numbers_base.go` | native cast + `bits.ReverseBytes*` | fastest; assumes the buffer is sufficiently aligned |
+| `-tags=aware_of_alignment` | `numbers_base_align.go` | `binary.BigEndian` over `unsafe.Slice` | alignment-safe; slightly slower |
+
+`unsafe.Slice((*byte)(p), n)` yields a `[]byte` view, and
+`binary.BigEndian.Uint16/Uint32/Uint64` reads byte-by-byte — never assuming
+alignment.
+
+**Lockstep rule:** the two files must expose the *same* function names,
+signatures, and error codes. Any change to numeric decoding is made in **both**
+files and tested under **both** tags. The project's own `go vet` / `go test`
+passes run both variants.
+
+---
+
+## 5. `SafeBuffer`: the reusable arena
+
+### Why it exists
+
+`TakeString`/`TakeBytes` must return values that **outlive the source buffer**.
+The motivating case is a Tarantool response: the wire buffer is a temporary
+allocation that gets reused or freed after the decode. Naively, every string
+would be a fresh `string([]byte)` allocation. `SafeBuffer` replaces per-field
+allocation with amortized reuse.
+
+### Why the default 512-byte capacity is the fastest
+
+The choice of arena capacity is a trade-off between **upfront allocation cost**
+and **avoiding mid-decode resets/clones**. Benchmarks (`BenchmarkTakeString_*`
+and `BenchmarkNewSafeBuffer` in `bench_test.go`) pin down the shape of that
+trade-off on the string-decode hot path:
+
+| capacity | `NewSafeBuffer` cost | fresh-buffer decode | reused-buffer decode |
+|---|---|---|---|
+| 64 B | 14 ns / 64 B / 1 alloc | ~178 ns | ~178 ns |
+| 128 B | 20 ns / 128 B / 1 alloc | ~131 ns | ~130 ns |
+| 256 B | 32 ns / 256 B / 1 alloc | ~115 ns / 2 allocs | ~106 ns / 1 alloc |
+| **512 B** | **60 ns** / 512 B / 1 alloc | **~115 ns / 1 alloc** | **~109 ns / 0 allocs** |
+| 1024 B | 110 ns / 1024 B / 1 alloc | ~171 ns | ~96 ns / 0 allocs |
+| 2048 B | 220 ns / 2048 B / 1 alloc | ~291 ns | ~93 ns / 0 allocs |
+| 4096 B | 430 ns / 4096 B / 1 alloc | ~495 ns | ~96 ns / 0 allocs |
+
+Two regimes emerge:
+
+1. **Below 512** — the arena is too small to hold a typical message's strings,
+   so the decoder pays the clone/reset path (`AllocString` paths 2 and 3)
+   repeatedly: extra allocations (`8` at cap 64, `4` at 128, `2` at 256) and
+   higher latency.
+2. **Above 512** — the reused-buffer steady state flattens out (~96 ns at 1024+),
+   because one 512–4096-byte arena already holds the whole message; the only
+   thing left is `make([]byte, cap)` zeroing, which scales linearly and is
+   already ~7× more expensive at 4096 B (430 ns) than at 512 B (60 ns).
+
+The **default 512 is the Pareto point**: it is large enough to avoid
+mid-decode resets for typical messages (0 extra allocs when the buffer is
+reused), yet small enough that allocating and zeroing the arena stays cheap.
+Larger capacities buy only ~10 ns of steady-state throughput at up to 7× the
+allocation cost; smaller capacities buy nothing and pay in extra allocations.
+This is why the doc comment on `NewSafeBuffer` says not to exceed 512 unless
+you reuse the buffer, and to prefer smaller than 512.
+
+### The allocation strategy
+
+`AllocString` / `AllocBytes` implement three paths:
+
+1. **Fits in current buffer** (`size + len(buf) <= cap(buf)`): append the
+   bytes and return an `unsafe.String`/`unsafe.Slice` view into the backing
+   array. No new allocation.
+2. **Too big to ever fit** (`size > cap(buf)`): the arena is useless; fall
+   back to `strings.Clone`/`bytes.Clone` (a single independent allocation) and
+   leave the arena untouched.
+3. **Doesn't fit now, but would fit an empty buffer** (`size <= cap`, but
+   `size + len > cap`): allocate a *fresh* backing array of the same capacity
+   and reset the cursor to 0.
+
+The subtle point is path 3: previously returned strings/bytes are `unsafe.String`
+headers pointing into the *old* array. Replacing `b.buf` does **not** invalidate
+them — the Go runtime keeps an array alive as long as any pointer into it is
+reachable. The `_test.go` GC-retention tests hammer `runtime.GC()` to prove
+this property holds.
+
+### `AllocAligned` and pointer-returning reads
+
+The `Take*Ptr` variants must return a `*T` that the caller can dereference
+safely. On 64-bit platforms a `*int64` or `*float64` must be 8-byte aligned,
+so a naive offset into the arena is not sufficient. `AllocAligned` reserves a
+slot whose address is a multiple of `ptrAlignment = 8`, inserting up to 7
+padding bytes before it:
+
+```
+  ┌─…─┬──── pad ────┬──── slot (size) ────┐
+  └─…─┴─────────────┴─────────────────────┘
+        ▲ 8-byte aligned
+```
+
+Its "cannot fit" threshold is `size + ptrAlignment - 1 > cap` — deliberately
+larger than the string/bytes path's `size > cap`. This guarantees that after a
+reset, the slot (plus worst-case padding) *always* fits, so the
+"reset and retry" loop terminates after at most one reset and can never spin.
+
+The caller contract is strict: **write the full value immediately** after
+`AllocAligned` returns. The padding bytes are never read.
+
+---
+
+## 6. Zero-copy strings
+
+`TakeStringZC` returns a `string` that points **directly into the caller's
+buffer** via `unsafe.String((*byte)(dataPtr), strLen)` — no copy, no arena.
+
+The trade-off is ownership:
+
+- The returned string is only valid for as long as the source buffer is alive
+  and not mutated.
+- If the source is a reused/transient buffer (the Tarantool case), the caller
+  must use `TakeString` instead, or copy the value before the buffer is
+  recycled.
+
+This is the classic zero-copy vs. lifetime tension, made explicit in the API by
+the `ZC` suffix.
+
+---
+
+## 7. `TakeSkip` and the explicit-stack skip
+
+Generated decoders must be able to *skip* unknown or uninteresting fields
+without decoding them. `TakeSkip` skips exactly one complete msgpack value —
+arrays and maps recursively — in **zero allocation**.
+
+The algorithm:
+
+1. Maintain a `[]uint64` stack; each entry is the number of *sibling* objects
+   remaining at that nesting depth. Start with `[1]` ("one object to skip").
+2. Pop the top counter; when it reaches 0, pop the level (done with this
+   container).
+3. `takeSkipSize` inspects the lead byte and returns `(advance, payload, children)`:
+   - `advance` — header bytes to move past (e.g. `3` for `array16`).
+   - `payload` — inline byte length (str/bin/ext bodies).
+   - `children` — how many child objects to push (map counts pairs ×2).
+4. Advance `src` past `advance`, then past `payload`, then push `children`.
+
+`takeSkipSize` is the single source of truth for the **entire msgpack marker
+grammar**: every lead-byte range (`fixint`, `fixstr`, `fixarray`, `fixmap`, and
+each `0xc0–0xdf` opcode) is enumerated. It doubles as documentation of the
+format. The recursion guard (`skipRecursionLimit = 100000`, matching
+`tinylib/msgp`) prevents a maliciously nested payload from exhausting the
+stack.
+
+---
+
+## 8. Cross-signedness parsing (compatibility behavior)
+
+The numeric readers deliberately accept the "wrong" signedness, so a decoder
+can be sloppy about whether a field is declared `int` or `uint`:
+
+- `takeUint64` parses signed markers `0xd0–0xd3` as unsigned, panicking
+  `ErrorUintOverflow` when the value is negative.
+- `takeInt64` parses unsigned markers `0xcc–0xcf`, panicking `ErrorIntOverflow`
+  when the value exceeds `math.MaxInt64`.
+
+This mirrors real-world msgpack producers that encode small positive numbers in
+the most compact form regardless of the schema's nominal signedness.
+
+---
+
+## 9. The MessagePack marker grammar (quick reference)
+
+The lead byte fully determines the decode. `takeSkipSize` and the header readers
+encode this table:
+
+| Lead byte(s) | Meaning |
+|---|---|
+| `0x00–0x7f` | positive fixint |
+| `0x80–0x8f` | fixmap (0–15 pairs) |
+| `0x90–0x9f` | fixarray (0–15 elements) |
+| `0xa0–0xbf` | fixstr (0–31 bytes) |
+| `0xc0` | nil |
+| `0xc1` | (unassigned — `ErrorSkipCorrupted`) |
+| `0xc2` / `0xc3` | false / true |
+| `0xc4–0xc6` | bin 8 / 16 / 32 |
+| `0xc7–0xc9` | ext 8 / 16 / 32 |
+| `0xca` / `0xcb` | float 32 / 64 |
+| `0xcc–0xcf` | uint 8 / 16 / 32 / 64 |
+| `0xd0–0xd3` | int 8 / 16 / 32 / 64 |
+| `0xd4–0xd8` | fixext 1 / 2 / 4 / 8 / 16 |
+| `0xd9–0xdb` | str 8 / 16 / 32 |
+| `0xdc` / `0xdd` | array 16 / 32 |
+| `0xde` / `0xdf` | map 16 / 32 |
+| `0xe0–0xff` | negative fixint |
+
+---
+
+## 10. The generated-code contract (context, not in this repo)
+
+`msgpunsafe` is the primitive layer under a code generator. The expected
+shape of generated code is:
+
+```go
+func (z *T) UnmarshalMsg(src, lim unsafe.Pointer, buf *msgpunsafe.SafeBuffer) (unsafe.Pointer, error) {
+    // 1. read a map/array header
+    n, src := msgpunsafe.TakeMapHeader(src, lim)
+    // 2. loop the expected fields, Take* each value
+    // 3. unknown fields -> TakeSkip
+    // 4. return the final src
+}
+```
+
+The `ErrorStructExhausted`, `ErrorStructCorrupted`, `ErrorUnknownField`, and
+`ErrorRequiredFieldMissing` codes are reserved for that layer: the generator
+raises them when the structure of a decoded value does not match the schema
+(e.g. a required field is missing from the map). The `Take*Ptr` variants exist
+so the generator can produce `*T` fields that point into a stable, aligned
+arena slot instead of copying the value back into the struct.
+
+---
+
+## 11. Performance model (mental checklist)
+
+When changing this library, keep these cost rules in mind:
+
+1. **Happy path = zero alloc.** Do not introduce allocations into `Take*`,
+   header readers, or `TakeSkip`.
+2. **Bounds checks are explicit and first.** Do not move a dereference before
+   its `uintptr` guard.
+3. **Numeric reads must stay two-backend.** Both `numbers_base*.go` files must
+   agree; test under both tags.
+4. **String/byte lifetimes are the caller's responsibility** — `ZC` variants
+   never copy, arena variants amortize, clone fallback is the safety net.
+5. **Errors are panics, never returns.** Adding a return path for an error is a
+   breaking change to the whole design.
+
+---
+
+## 12. Conventions and gotchas
+
+- Public API is `Take*` with full godoc comments; internal helpers are lowercase
+  (`take*`, `panicWithError`). Godoc is the primary documentation.
+- `IsNil` is the one exception to the "return the next pointer" rule: it returns
+  the *unchanged* `src` when the value is non-nil.
+- Wrong-type header markers currently collapse to `*HeaderCorrupted` (open TODO
+  in `headers.go` about reporting "got a map where an array was expected").
+- `go test -race` fails in the *test helper* `ptrs()` (`testhelp_test.go`),
+  which computes `lim` with `unsafe.Add(p, len(input))` past the slice's real
+  allocation — a test-only artifact, not a library bug.
+- gopls flags `numbers_base_align.go` as "No packages found" because of its
+  build tag; add `-tags=aware_of_alignment` to gopls `buildFlags` when editing
+  it.
