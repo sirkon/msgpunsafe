@@ -132,11 +132,14 @@ reuse the buffer across decodes.
 - `AllocString(data, size) string` / `AllocBytes(data, size) []byte` — copy into
   the arena so the result outlives the temporary source (e.g. a Tarantool
   response buffer). If `size > cap` they fall back to a direct
-  `strings.Clone`/`bytes.Clone`; otherwise they reset/append into the backing
-  array (previously returned headers keep prior backing arrays alive).
+  `strings.Clone`/`bytes.Clone`; otherwise they reset and memmove
+  (`copyNonOverlapping`, a `//go:linkname` alias for `runtime.memmove`) into
+  the backing array (previously returned headers keep prior backing arrays
+  alive).
 - `AllocAligned(size) unsafe.Pointer` — reserves a slot aligned to
-  `ptrAlignment = 8`; the caller must write the full value immediately. Its
-  direct-fallback threshold is `size+7 > cap` (not `size > cap`), so a reset
+  `ptrAlignment = 8`; the caller must write the full value immediately. Fresh
+  `make` allocations are already 8-byte aligned, so after a reset the slot
+  needs no padding and the direct-fallback threshold is `size > cap` — a reset
   buffer can never loop forever.
 
 ### Error handling (`errors.go`)

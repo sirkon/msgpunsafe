@@ -71,7 +71,7 @@ func TestTakeBoolPtr_ErrorNoAlloc(t *testing.T) {
 			return false, next
 		})
 	_ = got
-	if len(sBuf.buf) != 0 {
-		t.Fatalf("buffer must stay untouched on error, len = %d", len(sBuf.buf))
+	if sBuf.len != 0 {
+		t.Fatalf("buffer must stay untouched on error, len = %d", sBuf.len)
 	}
 }

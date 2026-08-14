@@ -48,8 +48,8 @@ func TestTakeUint64Ptr(t *testing.T) {
 					return uint64(0), next
 				})
 			if tc.wantErrCode != 0 {
-				if len(sBuf.buf) != 0 {
-					t.Fatalf("%s: buffer must stay untouched on error, len = %d", tc.name, len(sBuf.buf))
+				if sBuf.len != 0 {
+					t.Fatalf("%s: buffer must stay untouched on error, len = %d", tc.name, sBuf.len)
 				}
 				return
 			}
@@ -191,7 +191,7 @@ func TestTakePtr_MixedAlignment(t *testing.T) {
 			ptrsList = append(ptrsList, unsafe.Pointer(p))
 		}
 		if i > 0 {
-			if len(sBuf.buf) == 0 {
+			if sBuf.len == 0 {
 				t.Fatal("buffer len unexpectedly reset")
 			}
 		}

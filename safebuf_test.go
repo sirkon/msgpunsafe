@@ -36,8 +36,8 @@ func TestSafeBuffer_AllocString_InBuffer(t *testing.T) {
 	if !ptrInBuf(sBuf, unsafe.Pointer(unsafe.StringData(s))) {
 		t.Fatalf("string data must point into the safe buffer's backing array")
 	}
-	if len(sBuf.buf) != len(data) {
-		t.Fatalf("buf len = %d, want %d", len(sBuf.buf), len(data))
+	if sBuf.len != len(data) {
+		t.Fatalf("buf len = %d, want %d", sBuf.len, len(data))
 	}
 }
 
@@ -55,8 +55,8 @@ func TestSafeBuffer_AllocString_ImmediateClone(t *testing.T) {
 	if ptrInBuf(sBuf, unsafe.Pointer(unsafe.StringData(s))) {
 		t.Fatalf("expected an independent clone, but data points into the safe buffer")
 	}
-	if len(sBuf.buf) != 0 {
-		t.Fatalf("buffer must stay untouched on the clone path, len = %d", len(sBuf.buf))
+	if sBuf.len != 0 {
+		t.Fatalf("buffer must stay untouched on the clone path, len = %d", sBuf.len)
 	}
 }
 
@@ -74,8 +74,8 @@ func TestSafeBuffer_AllocBytes_ImmediateClone(t *testing.T) {
 	if ptrInBuf(sBuf, unsafe.Pointer(unsafe.SliceData(bs))) {
 		t.Fatalf("expected an independent clone, but data points into the safe buffer")
 	}
-	if len(sBuf.buf) != 0 {
-		t.Fatalf("buffer must stay untouched on the clone path, len = %d", len(sBuf.buf))
+	if sBuf.len != 0 {
+		t.Fatalf("buffer must stay untouched on the clone path, len = %d", sBuf.len)
 	}
 }
 
@@ -107,8 +107,8 @@ func TestSafeBuffer_BufferExhaustion_NewBuffer(t *testing.T) {
 	if ptrInBuf(sBuf, unsafe.Pointer(unsafe.StringData(s1))) {
 		t.Fatalf("s1 must point into the previous (exhausted) buffer, not the current one")
 	}
-	if len(sBuf.buf) != len(second) {
-		t.Fatalf("buf len = %d, want %d (cursor must reset to 0)", len(sBuf.buf), len(second))
+	if sBuf.len != len(second) {
+		t.Fatalf("buf len = %d, want %d (cursor must reset to 0)", sBuf.len, len(second))
 	}
 }
 
@@ -139,8 +139,8 @@ func TestSafeBuffer_SequentialInBufferAllocs(t *testing.T) {
 	if pc-pb != uintptr(len(b)) {
 		t.Fatalf("gap between sb and sc = %d, want %d", pc-pb, len(b))
 	}
-	if len(sBuf.buf) != len(a)+len(b)+len(c) {
-		t.Fatalf("buf len = %d, want %d", len(sBuf.buf), len(a)+len(b)+len(c))
+	if sBuf.len != len(a)+len(b)+len(c) {
+		t.Fatalf("buf len = %d, want %d", sBuf.len, len(a)+len(b)+len(c))
 	}
 }
 
@@ -297,8 +297,8 @@ func TestSafeBuffer_AllocAligned_Packing(t *testing.T) {
 	}
 	// buf len: 1 slot + 7 pad, then 1 slot + 7 pad, then 8-byte slot = 24
 	// (the last slot needs no padding).
-	if len(sBuf.buf) != 24 {
-		t.Fatalf("buf len = %d, want 24", len(sBuf.buf))
+	if sBuf.len != 24 {
+		t.Fatalf("buf len = %d, want 24", sBuf.len)
 	}
 }
 
@@ -325,8 +325,8 @@ func TestSafeBuffer_AllocAligned_Exhaustion(t *testing.T) {
 			t.Fatalf("old pointer %x must point into a previous (detached) buffer", uintptr(p))
 		}
 	}
-	if len(sBuf.buf) != 8 {
-		t.Fatalf("buf len = %d, want 8 (single slot after reset)", len(sBuf.buf))
+	if sBuf.len != 8 {
+		t.Fatalf("buf len = %d, want 8 (single slot after reset)", sBuf.len)
 	}
 }
 
@@ -342,8 +342,8 @@ func TestSafeBuffer_AllocAligned_Direct(t *testing.T) {
 	if ptrInBuf(sBuf, p) {
 		t.Fatalf("direct path must not use the buffer")
 	}
-	if len(sBuf.buf) != 0 {
-		t.Fatalf("buffer must stay untouched on the direct path, len = %d", len(sBuf.buf))
+	if sBuf.len != 0 {
+		t.Fatalf("buffer must stay untouched on the direct path, len = %d", sBuf.len)
 	}
 }
 

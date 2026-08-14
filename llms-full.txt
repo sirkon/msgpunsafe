@@ -235,17 +235,27 @@ you reuse the buffer, and to prefer smaller than 512.
 
 ### The allocation strategy
 
+The arena is a single `[]byte` allocated at **full capacity**
+(`make([]byte, cap)`), paired with a separate `len` field that tracks how many
+bytes are actually in use. The slice header's own `len` is never consulted;
+`len` is the cursor. This matters because the copy is done with
+`copyNonOverlapping` (a `//go:linkname` alias for `runtime.memmove`) rather
+than `append`: `append` would re-check the bounds on every write, but the code
+has *already* proved the payload fits (`size + len <= cap(b.buf)`), so a raw
+memmove skips the redundant bounds check entirely.
+
 `AllocString` / `AllocBytes` implement three paths:
 
-1. **Fits in current buffer** (`size + len(buf) <= cap(buf)`): append the
-   bytes and return an `unsafe.String`/`unsafe.Slice` view into the backing
-   array. No new allocation.
-2. **Too big to ever fit** (`size > cap(buf)`): the arena is useless; fall
+1. **Fits in current buffer** (`size + len <= cap(b.buf)`): memmove the bytes
+   in at offset `len`, advance `len`, and return an
+   `unsafe.String`/`unsafe.Slice` view into the backing array. No new
+   allocation.
+2. **Too big to ever fit** (`size > cap(b.buf)`): the arena is useless; fall
    back to `strings.Clone`/`bytes.Clone` (a single independent allocation) and
    leave the arena untouched.
 3. **Doesn't fit now, but would fit an empty buffer** (`size <= cap`, but
    `size + len > cap`): allocate a *fresh* backing array of the same capacity
-   and reset the cursor to 0.
+   and reset `len` to 0.
 
 The subtle point is path 3: previously returned strings/bytes are `unsafe.String`
 headers pointing into the *old* array. Replacing `b.buf` does **not** invalidate
@@ -267,13 +277,23 @@ padding bytes before it:
         ▲ 8-byte aligned
 ```
 
-Its "cannot fit" threshold is `size + ptrAlignment - 1 > cap` — deliberately
-larger than the string/bytes path's `size > cap`. This guarantees that after a
-reset, the slot (plus worst-case padding) *always* fits, so the
-"reset and retry" loop terminates after at most one reset and can never spin.
+The aligned slot address is computed with a bitmask, not a modulo:
+`(addr + ptrAlignment - 1) &^ (ptrAlignment - 1)` rounds the cursor up to the
+next 8-byte boundary in two cheap instructions.
+
+Two facts make the rest of the function simple:
+
+- Backing arrays from `make` are aligned to at least `ptrAlignment` (8), so a
+  fresh buffer needs **zero padding**: on the direct path and immediately
+  after a reset the slot starts at offset 0. Alignment work only happens
+  mid-buffer, after an odd-sized slot has misaligned the cursor.
+- The "cannot fit" threshold is therefore the same `size > cap(b.buf)` as the
+  string/bytes paths: after a reset the aligned slot is guaranteed to fit, so
+  the "reset and retry" loop terminates after at most one reset and can never
+  spin.
 
 The caller contract is strict: **write the full value immediately** after
-`AllocAligned` returns. The padding bytes are never read.
+`AllocAligned` returns. The padding bytes are never read and are not zeroed.
 
 ---
 
@@ -409,6 +429,8 @@ When changing this library, keep these cost rules in mind:
 
 - Public API is `Take*` with full godoc comments; internal helpers are lowercase
   (`take*`, `panicWithError`). Godoc is the primary documentation.
+- `copyNonOverlapping(dst, src, size)` is a `//go:linkname` alias for
+  `runtime.memmove(to, from, n)`.
 - `IsNil` is the one exception to the "return the next pointer" rule: it returns
   the *unchanged* `src` when the value is non-nil.
 - Wrong-type header markers currently collapse to `*HeaderCorrupted` (open TODO
